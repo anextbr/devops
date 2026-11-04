@@ -42,6 +42,27 @@ on:
         required: false
         type: string
         default: none
+    # Declared explicitly so callers from other organizations can pass them
+    # (`secrets: inherit` only works within the same org/enterprise).
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        description: Required when registryType=ecr.
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        description: Required when registryType=ecr.
+        required: false
+      AWS_REGION:
+        description: Required when registryType=ecr.
+        required: false
+      REGISTRY_LOGIN:
+        description: Required when registryType=generic.
+        required: false
+      REGISTRY_PASSWORD:
+        description: Required when registryType=generic.
+        required: false
+      GCP_SVC_DEVOPS_JSON_KEY:
+        description: Optional. Used when registryType=ecr and vars.GCP_ARTIFACTORY_BASE_PATH is set (mirror push to GCP Artifact Registry).
+        required: false
 
 jobs:
   docker:
@@ -75,14 +96,11 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
 
-      - name: AWS Create ECR repository
+      - name: Docker tag server (ecr)
         if: ${{ inputs.registryType == 'ecr' }}
         env:
           ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
-          IMAGE_REPOSITORY: ${{ inputs.imageRepository }}
         run: |
-          echo "Repository: ${ECR_REGISTRY}/${IMAGE_REPOSITORY}"
-          aws ecr create-repository --repository-name "${IMAGE_REPOSITORY}" || true
           echo "registryServer=${ECR_REGISTRY}" >> "$GITHUB_ENV"
 
       - name: Docker login (github)
@@ -149,12 +167,23 @@ jobs:
             exit 1
           fi
 
-          imageName="${registryServer}/${REGISTRY_NAMESPACE:+${REGISTRY_NAMESPACE}/}${repositoryName}"
+          imagePath="${REGISTRY_NAMESPACE:+${REGISTRY_NAMESPACE}/}${repositoryName}"
+          imageName="${registryServer}/${imagePath}"
 
           echo "Image: ${imageName}:${imageTag}"
+          echo "imagePath=${imagePath}" >> "$GITHUB_ENV"
           echo "imageName=${imageName}" >> "$GITHUB_ENV"
           echo "repositoryName=${repositoryName}" >> "$GITHUB_ENV"
           echo "imageTag=${imageTag}" >> "$GITHUB_ENV"
+
+      - name: AWS Create ECR repository
+        if: ${{ inputs.registryType == 'ecr' }}
+        run: |
+          if aws ecr describe-repositories --repository-names "${imagePath}" >/dev/null 2>&1; then
+            echo "ECR repository already exists: ${imagePath}"
+          else
+            aws ecr create-repository --repository-name "${imagePath}"
+          fi
 
       - name: Build and push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -164,8 +193,9 @@ jobs:
           file: ${{ inputs.dockerFile }}
           context: ${{ inputs.dockerContext }}
 
+      # Optional mirror: runs only when the caller defines vars.GCP_ARTIFACTORY_BASE_PATH
       - name: Docker login (GCP Artifact Registry)
-        if: ${{ inputs.registryType == 'ecr' }}
+        if: ${{ inputs.registryType == 'ecr' && vars.GCP_ARTIFACTORY_BASE_PATH != '' }}
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ${{ vars.GCP_ARTIFACTORY_BASE_PATH }}
@@ -173,7 +203,7 @@ jobs:
           password: ${{ secrets.GCP_SVC_DEVOPS_JSON_KEY }}
 
       - name: Build and push (GCP Artifact Registry)
-        if: ${{ inputs.registryType == 'ecr' }}
+        if: ${{ inputs.registryType == 'ecr' && vars.GCP_ARTIFACTORY_BASE_PATH != '' }}
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           push: true
@@ -190,7 +220,9 @@ jobs:
           cp -r .k8s build/ || true
           {
             echo "IMAGE_REPOSITORY=\"${imageName}\""
-            echo "IMAGE_REPOSITORY_GCP=\"${GCP_BASE_PATH}/${repositoryName}\""
+            if [[ -n "${GCP_BASE_PATH}" ]]; then
+              echo "IMAGE_REPOSITORY_GCP=\"${GCP_BASE_PATH}/${repositoryName}\""
+            fi
             echo "IMAGE_TAG=\"${imageTag}\""
             echo "IMAGE_NAME=${repositoryName}"
           } >> build/stage.build.out
