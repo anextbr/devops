@@ -1,0 +1,205 @@
+name: Docker Build & Push
+on:
+  workflow_call:
+    inputs:
+      imageRepository:
+        required: false
+        type: string
+        default: _none_
+      imageTag:
+        required: false
+        type: string
+        default: _X_
+      imageTagFrom:
+        required: false
+        type: string
+        default: _X_
+      dockerFile:
+        required: true
+        type: string
+      dockerContext:
+        required: true
+        type: string
+      registryType:
+        required: false
+        type: string
+        default: generic
+      registryServer:
+        description: Registry host for registryType=generic. Falls back to vars.REGISTRY_SERVER.
+        required: false
+        type: string
+        default: ''
+      registryNamespace:
+        description: Namespace prefix for the image path. Falls back to vars.REGISTRY_NAMESPACE.
+        required: false
+        type: string
+        default: ''
+      targetFirst:
+        required: false
+        type: string
+        default: none
+      targetSecond:
+        required: false
+        type: string
+        default: none
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # required only to push to ghcr.io (registryType: github)
+    env:
+      REGISTRY_SERVER: ${{ inputs.registryServer || vars.REGISTRY_SERVER }}
+      REGISTRY_NAMESPACE: ${{ inputs.registryNamespace || vars.REGISTRY_NAMESPACE }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: AWS credentials
+        if: ${{ inputs.registryType == 'ecr' }}
+        id: aws
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: AWS Login to ECR
+        if: ${{ inputs.registryType == 'ecr' }}
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      - name: AWS Create ECR repository
+        if: ${{ inputs.registryType == 'ecr' }}
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE_REPOSITORY: ${{ inputs.imageRepository }}
+        run: |
+          echo "Repository: ${ECR_REGISTRY}/${IMAGE_REPOSITORY}"
+          aws ecr create-repository --repository-name "${IMAGE_REPOSITORY}" || true
+          echo "registryServer=${ECR_REGISTRY}" >> "$GITHUB_ENV"
+
+      - name: Docker login (github)
+        if: ${{ inputs.registryType == 'github' }}
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker tag server (github)
+        if: ${{ inputs.registryType == 'github' }}
+        run: |
+          echo "registryServer=ghcr.io" >> "$GITHUB_ENV"
+
+      - name: Docker login (generic)
+        if: ${{ inputs.registryType == 'generic' }}
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ${{ env.REGISTRY_SERVER }}
+          username: ${{ secrets.REGISTRY_LOGIN }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Docker tag server (generic)
+        if: ${{ inputs.registryType == 'generic' }}
+        run: |
+          echo "registryServer=${REGISTRY_SERVER}" >> "$GITHUB_ENV"
+
+      - name: Set image tag and repository name
+        env:
+          IMAGE_REPOSITORY: ${{ inputs.imageRepository }}
+          IMAGE_TAG: ${{ inputs.imageTag }}
+          IMAGE_TAG_FROM: ${{ inputs.imageTagFrom }}
+        run: |
+          if [[ -z "${registryServer}" ]]; then
+            echo "::error::Registry server is empty. Set input registryServer or variable REGISTRY_SERVER."
+            exit 1
+          fi
+
+          if [[ "_none_" == "${IMAGE_REPOSITORY}" ]]; then
+            repositoryName="${GITHUB_REPOSITORY,,}"
+          else
+            repositoryName="${IMAGE_REPOSITORY}"
+          fi
+
+          if [[ "_X_" == "${IMAGE_TAG}" ]]; then
+            case "${IMAGE_TAG_FROM}" in
+              _X_)           imageTag="latest" ;;
+              branchTagName) imageTag="${GITHUB_REF_NAME//\//-}" ;;
+              shaCommit)     imageTag="${GITHUB_SHA}" ;;
+              *)             echo "::error::Invalid imageTagFrom: ${IMAGE_TAG_FROM}"; exit 1 ;;
+            esac
+          else
+            imageTag="${IMAGE_TAG}"
+          fi
+
+          # Docker tags allow only [A-Za-z0-9_.-], up to 128 chars, not starting with '.' or '-'
+          if ! [[ "${imageTag}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "::error::Invalid image tag: ${imageTag}"
+            exit 1
+          fi
+          if ! [[ "${repositoryName}" =~ ^[a-z0-9]+([._/-][a-z0-9]+)*$ ]]; then
+            echo "::error::Invalid repository name: ${repositoryName}"
+            exit 1
+          fi
+
+          imageName="${registryServer}/${REGISTRY_NAMESPACE:+${REGISTRY_NAMESPACE}/}${repositoryName}"
+
+          echo "Image: ${imageName}:${imageTag}"
+          echo "imageName=${imageName}" >> "$GITHUB_ENV"
+          echo "repositoryName=${repositoryName}" >> "$GITHUB_ENV"
+          echo "imageTag=${imageTag}" >> "$GITHUB_ENV"
+
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          push: true
+          tags: ${{ env.imageName }}:${{ env.imageTag }}
+          file: ${{ inputs.dockerFile }}
+          context: ${{ inputs.dockerContext }}
+
+      - name: Docker login (GCP Artifact Registry)
+        if: ${{ inputs.registryType == 'ecr' }}
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ${{ vars.GCP_ARTIFACTORY_BASE_PATH }}
+          username: _json_key
+          password: ${{ secrets.GCP_SVC_DEVOPS_JSON_KEY }}
+
+      - name: Build and push (GCP Artifact Registry)
+        if: ${{ inputs.registryType == 'ecr' }}
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          push: true
+          tags: ${{ vars.GCP_ARTIFACTORY_BASE_PATH }}/${{ env.repositoryName }}:${{ env.imageTag }}
+          file: ${{ inputs.dockerFile }}
+          context: ${{ inputs.dockerContext }}
+
+      - name: Finalize
+        id: final
+        env:
+          GCP_BASE_PATH: ${{ vars.GCP_ARTIFACTORY_BASE_PATH }}
+        run: |
+          mkdir -p build
+          cp -r .k8s build/ || true
+          {
+            echo "IMAGE_REPOSITORY=\"${imageName}\""
+            echo "IMAGE_REPOSITORY_GCP=\"${GCP_BASE_PATH}/${repositoryName}\""
+            echo "IMAGE_TAG=\"${imageTag}\""
+            echo "IMAGE_NAME=${repositoryName}"
+          } >> build/stage.build.out
+          ls -laFh build
+
+      - name: Upload Job artefacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          include-hidden-files: true
+          name: build
+          path: build
+          retention-days: 7
