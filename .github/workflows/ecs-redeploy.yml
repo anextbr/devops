@@ -1,0 +1,119 @@
+name: ECS Redeploy
+on:
+  workflow_call:
+    inputs:
+      cluster:
+        description: ECS cluster name.
+        required: true
+        type: string
+      service:
+        description: ECS service name.
+        required: true
+        type: string
+      region:
+        description: AWS region of the cluster (e.g. sa-east-1).
+        required: true
+        type: string
+      waitForStable:
+        description: Wait until the service reaches a steady state (fails the job if it does not).
+        required: false
+        type: boolean
+        default: true
+    # Declared explicitly so callers from other organizations can pass them
+    # (`secrets: inherit` only works within the same org/enterprise).
+    secrets:
+      AWS_ROLE_ARN:
+        description: When set, authenticates to AWS via GitHub OIDC instead of access keys.
+        required: false
+      AWS_ACCESS_KEY_ID:
+        description: Required when AWS_ROLE_ARN is not set.
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        description: Required when AWS_ROLE_ARN is not set.
+        required: false
+
+jobs:
+  redeploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # required only for AWS OIDC (secrets.AWS_ROLE_ARN)
+    concurrency:
+      group: ecs-redeploy-${{ inputs.region }}-${{ inputs.cluster }}-${{ inputs.service }}
+      cancel-in-progress: false
+    env:
+      # Secrets cannot be referenced in `if:` directly; expose via env to branch on it
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      ECS_CLUSTER: ${{ inputs.cluster }}
+      ECS_SERVICE: ${{ inputs.service }}
+      ECS_REGION: ${{ inputs.region }}
+    steps:
+      - name: Validate inputs
+        run: |
+          if ! [[ "${ECS_CLUSTER}" =~ ^[A-Za-z0-9_-]{1,255}$ ]]; then
+            echo "::error::Invalid cluster name: ${ECS_CLUSTER}"; exit 1
+          fi
+          if ! [[ "${ECS_SERVICE}" =~ ^[A-Za-z0-9_-]{1,255}$ ]]; then
+            echo "::error::Invalid service name: ${ECS_SERVICE}"; exit 1
+          fi
+          if ! [[ "${ECS_REGION}" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]]; then
+            echo "::error::Invalid region: ${ECS_REGION}"; exit 1
+          fi
+
+      # Preferred: GitHub OIDC, enabled when the caller passes secrets.AWS_ROLE_ARN
+      - name: AWS credentials (OIDC)
+        if: ${{ env.AWS_ROLE_ARN != '' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: ${{ inputs.region }}
+
+      # Fallback: static access keys
+      - name: AWS credentials (access key)
+        if: ${{ env.AWS_ROLE_ARN == '' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.region }}
+
+      - name: Force new deployment
+        id: deploy
+        run: |
+          deploymentId=$(aws ecs update-service \
+            --cluster "${ECS_CLUSTER}" \
+            --service "${ECS_SERVICE}" \
+            --force-new-deployment \
+            --region "${ECS_REGION}" \
+            --query 'service.deployments[?status==`PRIMARY`].id | [0]' \
+            --output text)
+
+          echo "Deployment started: ${deploymentId}"
+          echo "deploymentId=${deploymentId}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### ECS redeploy"
+            echo ""
+            echo "| Cluster | Service | Region | Deployment |"
+            echo "| --- | --- | --- | --- |"
+            echo "| \`${ECS_CLUSTER}\` | \`${ECS_SERVICE}\` | \`${ECS_REGION}\` | \`${deploymentId}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wait for service to be stable
+        if: ${{ inputs.waitForStable }}
+        run: |
+          echo "Waiting for ${ECS_SERVICE} to reach a steady state..."
+          if aws ecs wait services-stable \
+               --cluster "${ECS_CLUSTER}" \
+               --services "${ECS_SERVICE}" \
+               --region "${ECS_REGION}"; then
+            echo "Service is stable." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::Service did not reach a steady state. Recent events:"
+            aws ecs describe-services \
+              --cluster "${ECS_CLUSTER}" \
+              --services "${ECS_SERVICE}" \
+              --region "${ECS_REGION}" \
+              --query 'services[0].events[:10].[createdAt,message]' \
+              --output table
+            exit 1
+          fi

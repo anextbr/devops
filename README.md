@@ -5,6 +5,7 @@ Workflows reutilizáveis do GitHub Actions da Anext.
 | Workflow | O que faz |
 | --- | --- |
 | [`docker-build-multi.yml`](.github/workflows/docker-build-multi.yml) | Faz o build de uma imagem Docker e o push para o Amazon ECR, o GitHub Container Registry ou um registry genérico. |
+| [`ecs-redeploy.yml`](.github/workflows/ecs-redeploy.yml) | Força um novo deploy de um serviço do Amazon ECS e espera o serviço estabilizar. |
 | [`security.yml`](.github/workflows/security.yml) | Roda o Trivy no repositório de quem chama, procurando vulnerabilidades, erros de configuração e segredos expostos. |
 
 ## Exemplo de uso
@@ -40,6 +41,18 @@ jobs:
     secrets:
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
       AWS_REGION: ${{ secrets.AWS_REGION }}
+
+  deploy:
+    needs: build
+    uses: anextbr/devops/.github/workflows/ecs-redeploy.yml@<sha> # vX.Y.Z
+    permissions:
+      id-token: write
+    with:
+      cluster: meu-cluster
+      service: minha-aplicacao
+      region: sa-east-1
+    secrets:
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
 ```
 
 Nesse exemplo, a autenticação na AWS usa GitHub OIDC com a role informada em `AWS_ROLE_ARN` (veja a seção "Autenticação na AWS" abaixo).
@@ -117,6 +130,33 @@ O job publica um artifact chamado `build`, guardado por 7 dias. Ele contém:
 - uma cópia da pasta `.k8s/` do repositório que chama, se ela existir.
 
 > Em repositórios públicos, qualquer pessoa pode baixar esse artifact. Não deixe segredos em texto puro nos manifests de `.k8s/`.
+
+## `ecs-redeploy.yml`
+
+Executa o equivalente a:
+
+```sh
+aws ecs update-service --cluster <cluster> --service <service> --force-new-deployment --region <region>
+```
+
+As tasks são recriadas com a mesma task definition. Se ela usa uma tag fixa (como `latest`), as novas tasks puxam a imagem enviada mais recentemente para essa tag.
+
+### Inputs
+
+| Input | Obrigatório | Padrão | Descrição |
+| --- | --- | --- | --- |
+| `cluster` | sim | | Nome do cluster ECS. |
+| `service` | sim | | Nome do serviço ECS. |
+| `region` | sim | | Região AWS do cluster (ex.: `sa-east-1`). |
+| `waitForStable` | não | `true` | Espera o serviço estabilizar. Se ele não estabilizar, o job falha e mostra os últimos eventos do serviço. |
+
+### Secrets
+
+A autenticação funciona como no `docker-build-multi.yml` (veja a seção "Autenticação na AWS"): GitHub OIDC com `AWS_ROLE_ARN`, ou `AWS_ACCESS_KEY_ID` e `AWS_SECRET_ACCESS_KEY` como alternativa. A região vem do input `region`, então aqui não é preciso passar o `AWS_REGION`.
+
+A role ou o usuário IAM precisa de `ecs:UpdateService` e `ecs:DescribeServices` no serviço.
+
+O job que chama precisa conceder `id-token: write`. Redeploys do mesmo serviço não rodam ao mesmo tempo: entram numa fila e executam em sequência.
 
 ## `security.yml`
 
