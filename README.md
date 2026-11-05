@@ -30,6 +30,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     with:
       registryType: ecr
       dockerFile: Dockerfile
@@ -37,10 +38,11 @@ jobs:
       imageRepository: minha-aplicacao
       imageTagFrom: shaCommit
     secrets:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
       AWS_REGION: ${{ secrets.AWS_REGION }}
 ```
+
+Nesse exemplo, a autenticação na AWS usa GitHub OIDC com a role informada em `AWS_ROLE_ARN` (veja a seção "Autenticação na AWS" abaixo).
 
 A imagem vai para `<conta>.dkr.ecr.<região>.amazonaws.com/minha-aplicacao:<sha-do-commit>`. Se o repositório ainda não existir no ECR, o workflow cria.
 
@@ -65,7 +67,9 @@ Os secrets precisam ser passados explicitamente. `secrets: inherit` só funciona
 
 | Secret | Quando usar |
 | --- | --- |
-| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` | `registryType: ecr` |
+| `AWS_REGION` | `registryType: ecr` |
+| `AWS_ROLE_ARN` | `registryType: ecr` com GitHub OIDC (recomendado). |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `registryType: ecr` sem `AWS_ROLE_ARN`. |
 | `REGISTRY_LOGIN`, `REGISTRY_PASSWORD` | `registryType: generic` |
 | `GCP_SVC_DEVOPS_JSON_KEY` | Opcional: cópia da imagem para o GCP Artifact Registry (veja abaixo). |
 
@@ -80,6 +84,30 @@ As variables são lidas do repositório ou da organização de quem chama.
 | `REGISTRY_SERVER` | Valor padrão de `registryServer`. |
 | `REGISTRY_NAMESPACE` | Valor padrão de `registryNamespace`. |
 | `GCP_ARTIFACTORY_BASE_PATH` | Com `registryType: ecr`, também envia a imagem para esse caminho do GCP Artifact Registry. Exige o secret `GCP_SVC_DEVOPS_JSON_KEY`. |
+
+### Autenticação na AWS
+
+Com `registryType: ecr`, o workflow escolhe a forma de autenticação assim:
+
+1. **GitHub OIDC (recomendado).** Usado quando o secret `AWS_ROLE_ARN` é passado. O workflow assume a role sem nenhuma chave guardada no GitHub.
+2. **Access keys.** Usado quando `AWS_ROLE_ARN` não é passado. Nesse caso é preciso passar os secrets `AWS_ACCESS_KEY_ID` e `AWS_SECRET_ACCESS_KEY`.
+
+Nos dois casos, o secret `AWS_REGION` é obrigatório.
+
+Para usar OIDC, a conta AWS precisa ter o identity provider `token.actions.githubusercontent.com` (audience `sts.amazonaws.com`), e a trust policy da role precisa aceitar o repositório que chama. Em workflows reutilizáveis, o claim `sub` do token é o do repositório que chama, não o deste repositório. Exemplo de condição:
+
+```json
+"Condition": {
+  "StringEquals": {
+    "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+  },
+  "StringLike": {
+    "token.actions.githubusercontent.com:sub": "repo:<org>/<repositório>:*"
+  }
+}
+```
+
+A role precisa de permissão para criar repositórios e enviar imagens ao ECR, por exemplo `ecr:GetAuthorizationToken`, `ecr:DescribeRepositories`, `ecr:CreateRepository`, `ecr:BatchCheckLayerAvailability`, `ecr:InitiateLayerUpload`, `ecr:UploadLayerPart`, `ecr:CompleteLayerUpload`, `ecr:PutImage` e `ecr:BatchGetImage`.
 
 ### Saída
 
@@ -97,4 +125,4 @@ Não tem inputs nem secrets. Ele faz o checkout do repositório que chama e most
 ## Boas práticas
 
 - **Fixe a versão pelo SHA do commit** (`@<sha>`) em vez de `@main`. Assim uma mudança aqui não afeta todos os repositórios de uma vez.
-- **Conceda as permissões do exemplo** no job que chama (`contents: read` e `packages: write`). O `docker-build-multi.yml` pede `packages: write` para conseguir enviar ao ghcr.io, e o GitHub não deixa um workflow chamado pedir mais permissões do que quem chama concede. Por isso o job falha se essa permissão faltar, mesmo quando o registry é o ECR.
+- **Conceda as permissões do exemplo** no job que chama (`contents: read`, `packages: write` e `id-token: write`). O `docker-build-multi.yml` pede `packages: write` (para o ghcr.io) e `id-token: write` (para o OIDC da AWS), e o GitHub não deixa um workflow chamado pedir mais permissões do que quem chama concede. Por isso o job falha se alguma delas faltar, mesmo quando ela não é usada.

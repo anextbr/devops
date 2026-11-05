@@ -45,11 +45,14 @@ on:
     # Declared explicitly so callers from other organizations can pass them
     # (`secrets: inherit` only works within the same org/enterprise).
     secrets:
+      AWS_ROLE_ARN:
+        description: When set (registryType=ecr), authenticates to AWS via GitHub OIDC instead of access keys.
+        required: false
       AWS_ACCESS_KEY_ID:
-        description: Required when registryType=ecr.
+        description: Required when registryType=ecr and AWS_ROLE_ARN is not set.
         required: false
       AWS_SECRET_ACCESS_KEY:
-        description: Required when registryType=ecr.
+        description: Required when registryType=ecr and AWS_ROLE_ARN is not set.
         required: false
       AWS_REGION:
         description: Required when registryType=ecr.
@@ -70,7 +73,10 @@ jobs:
     permissions:
       contents: read
       packages: write # required only to push to ghcr.io (registryType: github)
+      id-token: write # required only for AWS OIDC (secrets.AWS_ROLE_ARN)
     env:
+      # Secrets cannot be referenced in `if:` directly; expose via env to branch on it
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
       REGISTRY_SERVER: ${{ inputs.registryServer || vars.REGISTRY_SERVER }}
       REGISTRY_NAMESPACE: ${{ inputs.registryNamespace || vars.REGISTRY_NAMESPACE }}
     steps:
@@ -82,9 +88,18 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: AWS credentials
-        if: ${{ inputs.registryType == 'ecr' }}
-        id: aws
+      # Preferred: GitHub OIDC, enabled when the caller passes secrets.AWS_ROLE_ARN
+      - name: AWS credentials (OIDC)
+        if: ${{ inputs.registryType == 'ecr' && env.AWS_ROLE_ARN != '' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Fallback: static access keys
+      - name: AWS credentials (access key)
+        if: ${{ inputs.registryType == 'ecr' && env.AWS_ROLE_ARN == '' }}
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
