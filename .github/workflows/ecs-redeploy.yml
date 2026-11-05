@@ -10,10 +10,6 @@ on:
         description: ECS service name.
         required: true
         type: string
-      region:
-        description: AWS region of the cluster (e.g. sa-east-1).
-        required: true
-        type: string
       waitForStable:
         description: Wait until the service reaches a steady state (fails the job if it does not).
         required: false
@@ -22,6 +18,9 @@ on:
     # Declared explicitly so callers from other organizations can pass them
     # (`secrets: inherit` only works within the same org/enterprise).
     secrets:
+      AWS_REGION:
+        description: AWS region of the cluster (e.g. sa-east-1).
+        required: true
       AWS_ROLE_ARN:
         description: When set, authenticates to AWS via GitHub OIDC instead of access keys.
         required: false
@@ -38,14 +37,14 @@ jobs:
     permissions:
       id-token: write # required only for AWS OIDC (secrets.AWS_ROLE_ARN)
     concurrency:
-      group: ecs-redeploy-${{ inputs.region }}-${{ inputs.cluster }}-${{ inputs.service }}
+      group: ecs-redeploy-${{ inputs.cluster }}-${{ inputs.service }}
       cancel-in-progress: false
     env:
       # Secrets cannot be referenced in `if:` directly; expose via env to branch on it
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
       ECS_CLUSTER: ${{ inputs.cluster }}
       ECS_SERVICE: ${{ inputs.service }}
-      ECS_REGION: ${{ inputs.region }}
+      ECS_REGION: ${{ secrets.AWS_REGION }}
     steps:
       - name: Validate inputs
         run: |
@@ -56,7 +55,7 @@ jobs:
             echo "::error::Invalid service name: ${ECS_SERVICE}"; exit 1
           fi
           if ! [[ "${ECS_REGION}" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]]; then
-            echo "::error::Invalid region: ${ECS_REGION}"; exit 1
+            echo "::error::Secret AWS_REGION is empty or invalid."; exit 1
           fi
 
       # Preferred: GitHub OIDC, enabled when the caller passes secrets.AWS_ROLE_ARN
@@ -66,7 +65,7 @@ jobs:
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
-          aws-region: ${{ inputs.region }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
       # Fallback: static access keys
       - name: AWS credentials (access key)
@@ -75,7 +74,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ inputs.region }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Force new deployment
         id: deploy
@@ -93,9 +92,9 @@ jobs:
           {
             echo "### ECS redeploy"
             echo ""
-            echo "| Cluster | Service | Region | Deployment |"
-            echo "| --- | --- | --- | --- |"
-            echo "| \`${ECS_CLUSTER}\` | \`${ECS_SERVICE}\` | \`${ECS_REGION}\` | \`${deploymentId}\` |"
+            echo "| Cluster | Service | Deployment |"
+            echo "| --- | --- | --- |"
+            echo "| \`${ECS_CLUSTER}\` | \`${ECS_SERVICE}\` | \`${deploymentId}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Wait for service to be stable

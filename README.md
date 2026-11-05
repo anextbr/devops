@@ -50,9 +50,9 @@ jobs:
     with:
       cluster: meu-cluster
       service: minha-aplicacao
-      region: sa-east-1
     secrets:
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
 ```
 
 Nesse exemplo, a autenticação na AWS usa GitHub OIDC com a role informada em `AWS_ROLE_ARN` (veja a seção "Autenticação na AWS" abaixo).
@@ -136,7 +136,7 @@ O job publica um artifact chamado `build`, guardado por 7 dias. Ele contém:
 Executa o equivalente a:
 
 ```sh
-aws ecs update-service --cluster <cluster> --service <service> --force-new-deployment --region <region>
+aws ecs update-service --cluster <cluster> --service <service> --force-new-deployment --region <AWS_REGION>
 ```
 
 As tasks são recriadas com a mesma task definition. Se ela usa uma tag fixa (como `latest`), as novas tasks puxam a imagem enviada mais recentemente para essa tag.
@@ -147,12 +147,11 @@ As tasks são recriadas com a mesma task definition. Se ela usa uma tag fixa (co
 | --- | --- | --- | --- |
 | `cluster` | sim | | Nome do cluster ECS. |
 | `service` | sim | | Nome do serviço ECS. |
-| `region` | sim | | Região AWS do cluster (ex.: `sa-east-1`). |
 | `waitForStable` | não | `true` | Espera o serviço estabilizar. Se ele não estabilizar, o job falha e mostra os últimos eventos do serviço. |
 
 ### Secrets
 
-A autenticação funciona como no `docker-build-multi.yml` (veja a seção "Autenticação na AWS"): GitHub OIDC com `AWS_ROLE_ARN`, ou `AWS_ACCESS_KEY_ID` e `AWS_SECRET_ACCESS_KEY` como alternativa. A região vem do input `region`, então aqui não é preciso passar o `AWS_REGION`.
+A autenticação funciona como no `docker-build-multi.yml` (veja a seção "Autenticação na AWS"): GitHub OIDC com `AWS_ROLE_ARN`, ou `AWS_ACCESS_KEY_ID` e `AWS_SECRET_ACCESS_KEY` como alternativa. O secret `AWS_REGION` é obrigatório e indica a região do cluster.
 
 A role ou o usuário IAM precisa de `ecs:UpdateService` e `ecs:DescribeServices` no serviço.
 
